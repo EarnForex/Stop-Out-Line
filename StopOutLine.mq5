@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "www.EarnForex.com, 2025"
 #property link      "https://www.earnforex.com/indicators/Stop-Out-Line/"
-#property version   "1.00"
+#property version   "1.01"
 #property indicator_plots 0
 #property indicator_chart_window
 
@@ -168,16 +168,13 @@ void CalculateStopOutPrice()
     else currentPrice = tick.ask; // Net short position is closed at Ask.
 
     // Calculate pip value for the position
-    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    double pipValue = (tickValue / tickSize) * symbolPositionLots;
+    AccCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+    
+    double point_value_risk = CalculatePointValue(Risk);
+    if (point_value_risk == 0) return; // No symbol information yet.
 
     // Calculate price movement needed to reach stop-out.
-    double priceMovement = 0;
-    if (pipValue > 0)
-    {
-        priceMovement = maxLoss / pipValue;
-    }
+    double priceMovement = maxLoss / (point_value_risk * MathAbs(netLots));
 
     // Calculate stop-out price based on position direction.
     if (positionDirection == 1) // Long position.
@@ -266,5 +263,152 @@ void DeleteLineAndLabel()
     ObjectDelete(ChartID(), LabelObjectName);
     ChartRedraw();
     StopOutPrice = 0;
+}
+
+enum mode_of_operation
+{
+    Risk,
+    Reward
+};
+
+string AccCurrency;
+double CalculatePointValue(mode_of_operation mode)
+{
+    string cp = Symbol();
+    double UnitCost = CalculateUnitCost(cp, mode);
+    double OnePoint = SymbolInfoDouble(cp, SYMBOL_POINT);
+    return(UnitCost / OnePoint);
+}
+
+//+----------------------------------------------------------------------+
+//| Returns unit cost either for Risk or for Reward mode.                |
+//+----------------------------------------------------------------------+
+double CalculateUnitCost(const string cp, const mode_of_operation mode)
+{
+    ENUM_SYMBOL_CALC_MODE CalcMode = (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(cp, SYMBOL_TRADE_CALC_MODE);
+
+    // No-Forex.
+    if ((CalcMode != SYMBOL_CALC_MODE_FOREX) && (CalcMode != SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE) && (CalcMode != SYMBOL_CALC_MODE_FUTURES) && (CalcMode != SYMBOL_CALC_MODE_EXCH_FUTURES) && (CalcMode != SYMBOL_CALC_MODE_EXCH_FUTURES_FORTS))
+    {
+        double TickSize = SymbolInfoDouble(cp, SYMBOL_TRADE_TICK_SIZE);
+        double UnitCost = TickSize * SymbolInfoDouble(cp, SYMBOL_TRADE_CONTRACT_SIZE);
+        string ProfitCurrency = SymbolInfoString(cp, SYMBOL_CURRENCY_PROFIT);
+        if (ProfitCurrency == "RUR") ProfitCurrency = "RUB";
+
+        // If profit currency is different from account currency.
+        if (ProfitCurrency != AccCurrency)
+        {
+            return(UnitCost * CalculateAdjustment(ProfitCurrency, mode));
+        }
+        return UnitCost;
+    }
+    // With Forex instruments, tick value already equals 1 unit cost.
+    else
+    {
+        if (mode == Risk) return SymbolInfoDouble(cp, SYMBOL_TRADE_TICK_VALUE_LOSS);
+        else return SymbolInfoDouble(cp, SYMBOL_TRADE_TICK_VALUE_PROFIT);
+    }
+}
+
+//+-----------------------------------------------------------------------------------+
+//| Calculates necessary adjustments for cases when GivenCurrency != AccountCurrency. |
+//| Used in two cases: profit adjustment and margin adjustment.                       |
+//+-----------------------------------------------------------------------------------+
+double CalculateAdjustment(const string ProfitCurrency, const mode_of_operation mode)
+{
+    string ReferenceSymbol = GetSymbolByCurrencies(ProfitCurrency, AccCurrency);
+    bool ReferenceSymbolMode = true;
+    // Failed.
+    if (ReferenceSymbol == NULL)
+    {
+        // Reversing currencies.
+        ReferenceSymbol = GetSymbolByCurrencies(AccCurrency, ProfitCurrency);
+        ReferenceSymbolMode = false;
+    }
+    // Everything failed.
+    if (ReferenceSymbol == NULL)
+    {
+        Print("Error! Cannot detect proper currency pair for adjustment calculation: ", ProfitCurrency, ", ", AccCurrency, ".");
+        ReferenceSymbol = Symbol();
+        return 1;
+    }
+    MqlTick tick;
+    SymbolInfoTick(ReferenceSymbol, tick);
+    return GetCurrencyCorrectionCoefficient(tick, mode, ReferenceSymbolMode);
+}
+
+//+---------------------------------------------------------------------------+
+//| Returns a currency pair with specified base currency and profit currency. |
+//+---------------------------------------------------------------------------+
+string GetSymbolByCurrencies(string base_currency, string profit_currency)
+{
+    // Cycle through all symbols.
+    for (int s = 0; s < SymbolsTotal(false); s++)
+    {
+        // Get symbol name by number.
+        string symbolname = SymbolName(s, false);
+
+        // Skip non-Forex pairs.
+        if ((SymbolInfoInteger(symbolname, SYMBOL_TRADE_CALC_MODE) != SYMBOL_CALC_MODE_FOREX) && (SymbolInfoInteger(symbolname, SYMBOL_TRADE_CALC_MODE) != SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE)) continue;
+
+        // Get its base currency.
+        string b_cur = SymbolInfoString(symbolname, SYMBOL_CURRENCY_BASE);
+        if (b_cur == "RUR") b_cur = "RUB";
+
+        // Get its profit currency.
+        string p_cur = SymbolInfoString(symbolname, SYMBOL_CURRENCY_PROFIT);
+        if (p_cur == "RUR") p_cur = "RUB";
+        
+        // If the currency pair matches both currencies, select it in Market Watch and return its name.
+        if ((b_cur == base_currency) && (p_cur == profit_currency))
+        {
+            // Select if necessary.
+            if (!(bool)SymbolInfoInteger(symbolname, SYMBOL_SELECT)) SymbolSelect(symbolname, true);
+
+            return symbolname;
+        }
+    }
+    return NULL;
+}
+
+//+------------------------------------------------------------------+
+//| Get profit correction coefficient based on profit currency,      |
+//| calculation mode (profit or loss), reference pair mode (reverse  |
+//| or direct), and current prices.                                  |
+//+------------------------------------------------------------------+
+double GetCurrencyCorrectionCoefficient(MqlTick &tick, const mode_of_operation mode, const bool ReferenceSymbolMode)
+{
+    if ((tick.ask == 0) || (tick.bid == 0)) return -1; // Data is not yet ready.
+    if (mode == Risk)
+    {
+        // Reverse quote.
+        if (ReferenceSymbolMode)
+        {
+            // Using Buy price for reverse quote.
+            return tick.ask;
+        }
+        // Direct quote.
+        else
+        {
+            // Using Sell price for direct quote.
+            return(1 / tick.bid);
+        }
+    }
+    else if (mode == Reward)
+    {
+        // Reverse quote.
+        if (ReferenceSymbolMode)
+        {
+            // Using Sell price for reverse quote.
+            return tick.bid;
+        }
+        // Direct quote.
+        else
+        {
+            // Using Buy price for direct quote.
+            return(1 / tick.ask);
+        }
+    }
+    return -1;
 }
 //+------------------------------------------------------------------+

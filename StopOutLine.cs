@@ -2,7 +2,7 @@
 //   Displays a stop-out line for the current symbol.
 //   You can hide/show the line by pressing Shift+S.
 //   
-//   Version 1.00
+//   Version 1.01
 //   Copyright 2025, EarnForex.com
 //   https://www.earnforex.com/indicators/Stop-Out-Line/
 // -------------------------------------------------------------------------------
